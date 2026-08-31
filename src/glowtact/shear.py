@@ -578,7 +578,8 @@ class ShearField:
     #: slid by half a pixel.
     CONSENSUS_INLIER_PX = 0.35
 
-    def residual_field(self, min_conf=0.12, robust=True, samples=300, seed=0):
+    def residual_field(self, min_conf=0.12, robust=True, samples=300, seed=0,
+                       population=None):
         """Per-node flow minus the best-fit AFFINE (translation+rotation+stretch).
 
         A press deforms the gel smoothly (bulk shift, rotation, radial stretch)
@@ -596,8 +597,18 @@ class ShearField:
         it starts from the contaminated solution. Maximising the number of
         nodes explained to within noise picks the body (the coherent majority)
         and leaves the patch as the residual.
+
+        ``population`` (bool per node) restricts the nodes the body is fitted
+        on; residuals are still returned for every node. Slip detection fits
+        on the contact patch alone: the elastic field AROUND an imprint decays
+        with distance (Boussinesq), which no single affine map describes, so a
+        whole-frame fit takes the still far gel as the body and reports the
+        entire deforming neighbourhood as slip (measured on a plain normal
+        press of a coin: 73-100% of the rim nodes flagged, none of it slip).
         """
         good = self.conf >= min_conf
+        if population is not None:
+            good = good & np.asarray(population, bool)
         if good.sum() < 6:
             z = np.zeros(len(self.nodes))
             return z, z, good
@@ -694,11 +705,17 @@ class ShearField:
         pixel ``contact`` mask only nodes on / next to the imprint are eligible,
         so texture noise far from the object cannot register as slip.
         """
-        thresh = self.SLIP_RESIDUAL_PX if thresh is None else float(thresh)
-        rx, ry, good = self.residual_field(min_conf)
+        eligible_pop = self._node_contact(contact)
+        rx, ry, good = self.residual_field(min_conf, population=eligible_pop)
         mag = np.hypot(rx, ry)
-        eligible = good & self._node_contact(contact)
-        return (eligible & (mag > thresh)), mag
+        eligible = good & eligible_pop
+        if thresh is None:
+            # Adaptive: the gripping majority sets the noise scale (robust
+            # MAD), never below the sensor's own residual floor.
+            r = mag[eligible]
+            scale = 1.4826 * float(np.median(r)) if r.size else 0.0
+            thresh = max(self.SLIP_RESIDUAL_PX, 2.5 * scale)
+        return (eligible & (mag > float(thresh))), mag
 
     def slip_area(self, min_conf=0.12, thresh=None, contact=None):
         """Slipping fraction of the contact and its Cattaneo annularity.
@@ -822,6 +839,93 @@ class ShearField:
         fill_mask = enclosed.ravel()
         conf[fill_mask] = np.maximum(conf[fill_mask], min_conf)  # drawn, flagged
         return ShearField(self.nodes, vecs, conf, self.grid), fill_mask
+
+
+# -- temporal slip: the imprint moving relative to the gel --------------------
+
+#: Frame-to-frame relative speed (px/frame) between a point of the imprint and
+#: the surrounding gel above which that point is sliding. Measured on this
+#: sensor: frames with the object at rest read 0.04-0.2 px of relative jitter,
+#: frames where it slid read 1.0-2.8 px.
+SLIP_VELOCITY_PX = 0.5
+
+
+def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
+                  fov=None, min_conf=0.10, thresh=None, ring_px=45,
+                  method="flow"):
+    """Slip as MOTION of the imprint relative to the gel -- per node, per frame.
+
+    Why temporal, not spatial: on a marker-less gel the interior of the
+    contact carries the OBJECT's own texture (coin relief, fingerprint
+    ridges), so a frame-to-frame flow measured there is the object's
+    velocity, while the speckle just outside the imprint gives the gel's.
+    Gripping means the two agree -- the object and the gel it holds move as
+    one; a point of the imprint moving relative to the neighbouring gel is,
+    by definition, sliding over it (Dong et al. 2019). This needs no model
+    of how the gel deforms, which is what defeats the spatial (non-affine
+    residual) view: a soft fingertip deforms non-affinely without slipping.
+
+    Args:
+      prev_gray, cur_gray: consecutive frames.
+      contact: bool pixel mask of the imprint (shear.contact_mask).
+      ring_px: the gel reference is the median velocity of confident nodes
+        within this distance outside the imprint.
+      thresh: relative speed (px/frame) flagging slip; default
+        SLIP_VELOCITY_PX.
+
+    Returns a dict:
+      field        the frame-to-frame ShearField (object texture tracked too)
+      inside       bool per node: node lies on the imprint
+      rel          per-node |v_node - v_gel| (px/frame), NaN off the imprint
+      slip         bool per node: inside, confident, rel > thresh
+      v_obj        median velocity of the confident imprint nodes (dx, dy)
+      v_gel        median velocity of the ring nodes (dx, dy)
+      n_contact    confident imprint nodes
+      n_slip       of those, sliding
+      slip_frac / stick_ratio
+      slip_area_px  approx sliding area (cells x spacing^2), clipped to the
+                    imprint's pixel area
+    """
+    import cv2
+
+    thresh = SLIP_VELOCITY_PX if thresh is None else float(thresh)
+    # smooth=False: the 3x3 grid median would blend imprint nodes with the
+    # gel across the contact boundary -- exactly the contrast this measures.
+    field = shear_field(prev_gray, cur_gray, spacing=spacing, win=win,
+                        method=method, fov=fov, smooth=False)
+    contact = np.asarray(contact, bool)
+    ni = field.nodes.astype(int)
+    ni[:, 0] = np.clip(ni[:, 0], 0, contact.shape[1] - 1)
+    ni[:, 1] = np.clip(ni[:, 1], 0, contact.shape[0] - 1)
+    inside = contact[ni[:, 1], ni[:, 0]]
+    dist = cv2.distanceTransform((~contact).astype(np.uint8), cv2.DIST_L2, 3)
+    ring = (~inside) & (dist[ni[:, 1], ni[:, 0]] < ring_px)
+    good = field.conf >= min_conf
+
+    nan2 = np.array([np.nan, np.nan])
+    v_gel = (np.median(field.vecs[ring & good], axis=0)
+             if (ring & good).sum() >= 3 else nan2)
+    # The object's velocity from nodes whose window lies wholly on the
+    # imprint: an edge node's window is half gel and reads a blend.
+    k = max(1, int(win // 2))
+    core = cv2.erode(contact.astype(np.uint8),
+                     np.ones((2 * k + 1, 2 * k + 1), np.uint8))[ni[:, 1], ni[:, 0]] > 0
+    core_good = core & good if (core & good).any() else inside & good
+    v_obj = (np.median(field.vecs[core_good], axis=0)
+             if core_good.sum() >= 1 else nan2)
+    rel = np.full(len(field.nodes), np.nan)
+    if np.isfinite(v_gel).all():
+        d = field.vecs - v_gel
+        rel[inside] = np.hypot(d[inside, 0], d[inside, 1])
+    slip = inside & good & np.isfinite(rel) & (rel > thresh)
+    n_contact = int((inside & good).sum())
+    n_slip = int(slip.sum())
+    frac = n_slip / n_contact if n_contact else 0.0
+    area = min(float(n_slip * spacing * spacing), float(contact.sum()))
+    return {"field": field, "inside": inside, "rel": rel, "slip": slip,
+            "v_obj": v_obj, "v_gel": v_gel, "n_contact": n_contact,
+            "n_slip": n_slip, "slip_frac": float(frac),
+            "stick_ratio": float(1.0 - frac), "slip_area_px": area}
 
 
 def _grid_median(vecs, grid, k=1):

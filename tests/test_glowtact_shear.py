@@ -170,3 +170,53 @@ def test_flow_score_ranks_clean_above_noisy():
     assert clean["score"] > 90 and clean["grade"] == "excellent"
     assert dirty["score"] < clean["score"]
     assert 0 <= dirty["score"] <= 100
+
+
+# -- temporal slip: imprint moving relative to the gel ------------------------
+
+def _speckle(seed=0, size=(240, 240)):
+    import cv2
+    rng = np.random.default_rng(seed)
+    g = rng.integers(0, 255, size, dtype=np.uint8)
+    return cv2.GaussianBlur(g, (0, 0), 1.2)
+
+
+def _pair(object_shift, gel_shift=(0, 0)):
+    """prev/cur frames: a textured 'imprint' square that moves by object_shift
+    while the surrounding gel speckle moves by gel_shift."""
+    prev = _speckle(0)
+    cur = np.roll(np.roll(prev, gel_shift[1], 0), gel_shift[0], 1)
+    imprint = _speckle(1)[80:160, 80:160]
+    prev = prev.copy(); prev[80:160, 80:160] = imprint
+    cur = cur.copy()
+    ox, oy = object_shift
+    cur[80 + oy:160 + oy, 80 + ox:160 + ox] = imprint
+    contact = np.zeros(prev.shape, bool); contact[84:156, 84:156] = True
+    return prev, cur, contact
+
+
+def test_object_sliding_over_still_gel_is_slip():
+    pytest.importorskip("cv2")
+    prev, cur, contact = _pair(object_shift=(3, 0))
+    r = shear.relative_slip(prev, cur, contact, spacing=20, win=31)
+    assert r["n_contact"] >= 4
+    assert r["slip_frac"] > 0.8                       # the whole imprint slides
+    assert abs(r["v_obj"][0] - 3.0) < 0.8 and abs(r["v_gel"][0]) < 0.4
+    assert not r["slip"][~r["inside"]].any()          # never flagged off-imprint
+
+
+def test_object_and_gel_moving_together_is_grip():
+    """The imprint carried along with the gel is exactly what gripping looks like."""
+    pytest.importorskip("cv2")
+    prev, cur, contact = _pair(object_shift=(3, 0), gel_shift=(3, 0))
+    r = shear.relative_slip(prev, cur, contact, spacing=20, win=31)
+    assert r["n_contact"] >= 4
+    assert r["slip_frac"] < 0.2
+    assert r["stick_ratio"] > 0.8
+
+
+def test_nothing_moving_is_not_slip():
+    pytest.importorskip("cv2")
+    prev, cur, contact = _pair(object_shift=(0, 0))
+    r = shear.relative_slip(prev, cur, contact, spacing=20, win=31)
+    assert r["n_slip"] == 0 and r["slip_area_px"] == 0.0

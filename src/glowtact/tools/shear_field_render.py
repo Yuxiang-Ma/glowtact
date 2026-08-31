@@ -141,6 +141,8 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
         rows.append((f"stick {100 * slip_stats['stick_ratio']:.0f}%"
                      f" ({slip_stats['n_slip']}/{slip_stats['n_contact']})",
                      SLIP_BGR))
+        if "slid_px" in slip_stats:
+            rows.append((f"slid {slip_stats['slid_px']:.1f}px", SLIP_BGR))
     x = 8
     for text, colour in rows:
         cv2.putText(banner, text, (x, 15), F, 0.42, colour, 1, cv2.LINE_AA)
@@ -150,7 +152,7 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
     # "slip=non-affine residual" off the right edge of every rendered video.
     legends = ["slide=mean tangential shift  twist=rotation x1e3  "
                "spread=push-out x1e3  slip=non-affine residual  "
-               "stick=gripping share of contact (red cells slide)",
+               "stick=imprint moving with the gel (red cells slide over it)",
                "slide=mean tangential shift  twist=rotation x1e3  "
                "spread=push-out x1e3  slip=non-affine residual",
                "slide=mean shift  twist=rotation x1e3  "
@@ -174,7 +176,7 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
            min_conf=0.10, fps=None, undistort=False, keep_fov=100.0,
            out_size=480, calib=None, coherence=True, max_dev=1.5, fill=True,
            slip=True, panel_dir=None, variants=None, slip_thresh=None,
-           mu=None, slip_area=True):
+           mu=None, slip_area=True, slip_mode="temporal"):
     """``scale=None`` auto-sizes arrows so the 90th-pct one is ~0.9 grid cells.
 
     Real shear is only 1-3 px, so arrows must be magnified to be seen; auto
@@ -217,9 +219,24 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
         if coherence:
             fld = fld.filter_coherence(min_conf, max_dev=max_dev)
         slips.append(fld.slip_index(min_conf) if slip else None)
-        if slip_area:
-            # Slip AREA on the coherence-filtered (unfilled) field: filled
-            # nodes are interpolated, so they carry no slip evidence.
+        if slip_area and slip_mode == "temporal":
+            # Slip AREA as the imprint moving relative to the gel between
+            # consecutive frames (shear.relative_slip) -- the definition that
+            # survives a soft object deforming without sliding.
+            rs = shear.relative_slip(frames[i - 1], g, cm, spacing=spacing,
+                                     win=win, fov=fov, min_conf=min_conf,
+                                     thresh=slip_thresh, method=method)
+            slip_nodes.append(rs["slip"])
+            d = rs["v_obj"] - rs["v_gel"]
+            step = float(np.hypot(*d)) if np.isfinite(d).all() else 0.0
+            slid = (slip_stats[-1]["slid_px"] if slip_stats and slip_stats[-1]
+                    else 0.0) + (step if rs["n_slip"] else 0.0)
+            slip_stats.append({k: rs[k] for k in ("n_contact", "n_slip",
+                                                  "slip_frac", "stick_ratio",
+                                                  "slip_area_px")}
+                              | {"rel_speed": step, "slid_px": slid})
+        elif slip_area:
+            # Spatial alternative: non-affine residual on the contact patch.
             sm, _ = fld.slip_mask(min_conf, slip_thresh, contact=cm)
             slip_nodes.append(sm)
             slip_stats.append(fld.slip_area(min_conf, slip_thresh, contact=cm))
@@ -299,8 +316,13 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
                         for s in slip_stats],
         "slip_frac": [None if s is None else s["slip_frac"]
                       for s in slip_stats],
-        "annularity": [None if s is None else s["annularity"]
+        "annularity": [None if s is None else s.get("annularity")
                        for s in slip_stats],
+        "slid_px": [None if s is None else s.get("slid_px")
+                    for s in slip_stats],
+        "rel_speed": [None if s is None else s.get("rel_speed")
+                      for s in slip_stats],
+        "slip_mode": slip_mode,
         "traction_p90": traction,
     }
 
@@ -365,6 +387,11 @@ def main(argv=None):
     ap.add_argument("--slip-thresh", type=float, default=None,
                     help="non-affine residual (px) that flags a node as "
                          "slipping (default ShearField.SLIP_RESIDUAL_PX)")
+    ap.add_argument("--slip-mode", choices=["temporal", "spatial"],
+                    default="temporal",
+                    help="temporal: imprint moving relative to the gel "
+                         "between frames (default); spatial: non-affine "
+                         "residual on the contact patch")
     ap.add_argument("--mu", type=float, default=None,
                     help="friction-cone threshold on |shear|/darkening; ring "
                          "the nodes above it (needs calibrating per sensor)")
@@ -395,7 +422,7 @@ def main(argv=None):
                coherence=not args.no_coherence, max_dev=args.max_dev,
                fill=not args.no_fill, slip=not args.no_slip,
                slip_area=not args.no_slip_area, slip_thresh=args.slip_thresh,
-               mu=args.mu)
+               mu=args.mu, slip_mode=args.slip_mode)
     print(f"outputs -> {out_dir}")
     return 0
 
