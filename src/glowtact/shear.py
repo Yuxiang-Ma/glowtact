@@ -885,6 +885,10 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
       slip_frac / stick_ratio
       slip_area_px  approx sliding area (cells x spacing^2), clipped to the
                     imprint's pixel area
+      noise / gate  this frame's far-gel flow scatter and the per-node gate
+                    derived from it (max(thresh, 2 * noise))
+      rel_speed     |v_obj - v_gel| (px/frame), the robust aggregate
+      sliding       frame verdict: rel_speed above max(1.5*thresh, 2.5*noise)
     """
     import cv2
 
@@ -917,7 +921,47 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
     if np.isfinite(v_gel).all():
         d = field.vecs - v_gel
         rel[inside] = np.hypot(d[inside, 0], d[inside, 1])
-    slip = inside & good & np.isfinite(rel) & (rel > thresh)
+
+    # The per-node noise of THIS frame, read off gel the object cannot
+    # reach (beyond the ring): the robust scatter of those nodes about their
+    # own median. Measured on the clips the ring's per-node scatter alone is
+    # 0.2-0.45 px at rest, so a fixed 0.5 px gate sat inside the noise and
+    # flagged 35-85% of a resting imprint; the far gel's scatter scales the
+    # gate with the frame's actual flow jitter (motion blur, lighting).
+    far = (~inside) & (dist[ni[:, 1], ni[:, 0]] >= ring_px) & good
+    if far.sum() >= 8:
+        dev = np.hypot(*(field.vecs[far] - np.median(field.vecs[far], 0)).T)
+        noise = 1.4826 * float(np.median(np.abs(dev - np.median(dev))))
+    else:
+        noise = 0.0
+    gate = max(thresh, 2.0 * noise)
+    rel_speed = (float(np.hypot(*(v_obj - v_gel)))
+                 if np.isfinite(v_obj).all() and np.isfinite(v_gel).all()
+                 else 0.0)
+    # Frame-level verdict on the robust aggregate, which separates rest
+    # (0.1-0.6 px/frame on the clips) from sliding (1.7-3 px/frame) cleanly.
+    sliding = rel_speed > max(1.5 * thresh, 2.5 * noise)
+    # Per-node partition, only once the frame is sliding: a node of the
+    # imprint moving with the GEL is stuck, one moving with the OBJECT has
+    # slipped -- nearest of the two velocities decides. Below the frame gate
+    # the per-node flow on object texture (fingerprint ridges: aperture
+    # ambiguity) scatters by ~0.5 px/frame, 2-3x the speckle's, so a partial
+    # slip smaller than the aggregate gate is not resolvable and reads 0.
+    if sliding:
+        d_obj = np.hypot(*(field.vecs - v_obj).T)
+        d_gel = np.hypot(*(field.vecs - v_gel).T)
+        slip = inside & good & np.isfinite(rel) & (rel > gate) & (d_obj < d_gel)
+    else:
+        slip = np.zeros(len(field.nodes), bool)
+    # Slip is a region, not a scatter: keep a flagged node only if a grid
+    # neighbour is flagged too (8-connected), which drops lone jitter hits.
+    rows, cols = field.grid
+    sg = slip.reshape(rows, cols)
+    padded = np.pad(sg, 1)
+    nb = sum(padded[1 + dy:1 + dy + rows, 1 + dx:1 + dx + cols]
+             for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0))
+    if (inside & good).sum() > 2:
+        slip = (sg & (nb >= 1)).ravel()
     n_contact = int((inside & good).sum())
     n_slip = int(slip.sum())
     frac = n_slip / n_contact if n_contact else 0.0
@@ -925,7 +969,9 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
     return {"field": field, "inside": inside, "rel": rel, "slip": slip,
             "v_obj": v_obj, "v_gel": v_gel, "n_contact": n_contact,
             "n_slip": n_slip, "slip_frac": float(frac),
-            "stick_ratio": float(1.0 - frac), "slip_area_px": area}
+            "stick_ratio": float(1.0 - frac), "slip_area_px": area,
+            "noise": float(noise), "gate": float(gate),
+            "rel_speed": rel_speed, "sliding": bool(sliding)}
 
 
 def _grid_median(vecs, grid, k=1):

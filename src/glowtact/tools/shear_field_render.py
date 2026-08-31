@@ -227,14 +227,13 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
                                      win=win, fov=fov, min_conf=min_conf,
                                      thresh=slip_thresh, method=method)
             slip_nodes.append(rs["slip"])
-            d = rs["v_obj"] - rs["v_gel"]
-            step = float(np.hypot(*d)) if np.isfinite(d).all() else 0.0
             slid = (slip_stats[-1]["slid_px"] if slip_stats and slip_stats[-1]
-                    else 0.0) + (step if rs["n_slip"] else 0.0)
+                    else 0.0) + (rs["rel_speed"] if rs["sliding"] else 0.0)
             slip_stats.append({k: rs[k] for k in ("n_contact", "n_slip",
                                                   "slip_frac", "stick_ratio",
-                                                  "slip_area_px")}
-                              | {"rel_speed": step, "slid_px": slid})
+                                                  "slip_area_px", "rel_speed",
+                                                  "sliding", "noise")}
+                              | {"slid_px": slid})
         elif slip_area:
             # Spatial alternative: non-affine residual on the contact patch.
             sm, _ = fld.slip_mask(min_conf, slip_thresh, contact=cm)
