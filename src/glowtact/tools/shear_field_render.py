@@ -240,7 +240,12 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
             sm, _ = fld.slip_mask(min_conf, slip_thresh, contact=cm)
             slip_nodes.append(sm)
             slip_stats.append(fld.slip_area(min_conf, slip_thresh, contact=cm))
+        else:
+            slip_nodes.append(None); slip_stats.append(None)
+        if slip_area:
             # Normal-load proxy: darkening of the gel (baseline - frame).
+            # Appended in BOTH slip modes: the panel loop zips these lists
+            # with the fields, and a short list silently drops every panel.
             pressure = np.clip(base.astype(np.int16) - g.astype(np.int16),
                                0, 255).astype(np.float32)
             ratio = fld.traction_ratio(pressure, min_conf, win=win)
@@ -250,7 +255,6 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
             cone_nodes.append(np.isfinite(ratio) & (ratio > mu)
                               if mu is not None else None)
         else:
-            slip_nodes.append(None); slip_stats.append(None)
             cone_nodes.append(None); traction.append(None)
         if fill:
             fld, fmask = fld.fill(min_conf)
@@ -283,9 +287,12 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
                else tempfile.mkdtemp(prefix="shear_field_"))
         os.makedirs(tmp, exist_ok=True)
         try:
+            series = (fields, masks, fills, slips, slip_nodes, slip_stats,
+                      cone_nodes)
+            assert len({len(s) for s in series}) == 1, \
+                [len(s) for s in series]          # one entry per rendered frame
             for k, (field, cm, fmask, sl, sn, ss, cn) in enumerate(
-                    zip(fields, masks, fills, slips, slip_nodes, slip_stats,
-                        cone_nodes), start=1):
+                    zip(*series), start=1):
                 panel = _draw_field(frames[k], field, cm, scale, min_conf,
                                     cap=cap_len, filled_mask=fmask, slip=sl,
                                     bg_denoise=v.get("denoise", True),

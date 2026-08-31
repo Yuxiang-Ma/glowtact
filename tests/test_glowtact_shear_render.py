@@ -69,3 +69,34 @@ def test_zero_fade_and_no_denoise_leaves_the_gel_alone():
     assert np.array_equal(out[..., 0], gray)
     assert np.array_equal(out[..., 1], gray)
     assert np.array_equal(out[..., 2], gray)
+
+
+def _tiny_clip(path, n=6):
+    """A few frames of speckle with a textured square pressing then sliding."""
+    import cv2
+    rng = np.random.default_rng(3)
+    gel = cv2.GaussianBlur(rng.integers(0, 255, (160, 160), dtype=np.uint8), (0, 0), 1.2)
+    obj = cv2.GaussianBlur(rng.integers(0, 255, (50, 50), dtype=np.uint8), (0, 0), 1.2)
+    vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 10.0, (160, 160))
+    for i in range(n):
+        f = gel.copy()
+        if i >= 1:
+            x = 55 + 2 * max(0, i - 2)                  # still, then sliding
+            f[55:105, x:x + 50] = (obj * 0.6).astype(np.uint8)  # darkening imprint
+        vw.write(cv2.cvtColor(f, cv2.COLOR_GRAY2BGR))
+    vw.release()
+
+
+@pytest.mark.parametrize("mode", ["temporal", "spatial"])
+def test_render_writes_one_panel_per_frame_in_every_slip_mode(tmp_path, mode):
+    """The panel loop zips several per-frame lists; a branch that forgets to
+    append to one of them silently rendered ZERO panels (temporal mode did)."""
+    clip = str(tmp_path / "clip.avi")
+    _tiny_clip(clip, n=6)
+    res = sfr.render(clip, str(tmp_path / "out.mp4"), spacing=20, win=21,
+                     min_conf=0.05, slip_mode=mode,
+                     panel_dir=str(tmp_path / "panels"))
+    assert res["n_panels"] == 5
+    assert len(list((tmp_path / "panels").glob("*.png"))) == 5
+    assert len(res["stick_ratio"]) == 5 and res["slip_mode"] == mode
+    assert (tmp_path / "out.mp4").exists()
