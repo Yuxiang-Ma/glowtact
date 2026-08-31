@@ -1,0 +1,24 @@
+backend: opencv_fisheye
+model: fisheye_kannala_brandt
+source_width: 640
+source_height: 480
+balance: 0.0
+rms_residual_px: 1.591
+source_image: opencv:14 views x 44 cells, 0 dropped
+K:
+- - 55.46064865761628
+  - 0.0
+  - 328.44656373433486
+- - 0.0
+  - 55.41032311641386
+  - 236.8495608676171
+- - 0.0
+  - 0.0
+  - 1.0
+D:
+- -0.6521134089232163
+- 1.811630985945993
+- -1.2741894860035494
+- 0.40149628116596847
+note: stock cv2.fisheye.calibrate intrinsics; apply with cv2.fisheye.initUndistortRectifyMap
+  (see build_maps_opencv)

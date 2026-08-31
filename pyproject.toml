@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glowtact"
+version = "0.2.0"
+description = "GlowTact tactile sensor library: camera, difference imaging, darkness-to-depth reconstruction, fisheye undistortion and shear tracking."
+readme = "README.md"
+requires-python = ">= 3.9"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# USB auto-discovery of the camera (a /sys fallback works without it).
+udev = ["pyudev"]
+# Figures, turntables and the offline renderers.
+render = ["matplotlib", "open3d", "Pillow"]
+dev = ["pytest"]
+
+[project.scripts]
+glowtact-camera = "glowtact.camera.__main__:main"
+glowtact-reconstruct = "glowtact.reconstruct:main"
+glowtact-undistort = "glowtact.undistort:main"
+glowtact-clean-diff = "glowtact.clean_diff:main"
+glowtact-enhance-diff = "glowtact.enhance_diff:main"
+glowtact-undistort-video = "glowtact.tools.undistort_video:main"
+glowtact-shear-eval = "glowtact.tools.shear_eval:main"
+glowtact-shear-render = "glowtact.tools.shear_render:main"
+glowtact-shear-field = "glowtact.tools.shear_field_render:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"glowtact.calib" = ["**/*.yaml", "**/*.npz"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+# capture artefacts and calibration debug bundles are data, not code
+*.avi
+*.mp4
+undistort_debug/
