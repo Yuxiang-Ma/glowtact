@@ -4,9 +4,9 @@ How to view, snapshot, and record a **GlowTact** tactile camera. Everything
 here is **camera-only — no force sensor is required**. (Force is only needed by
 `scripts/manual_collect.py`, the combined tactile+force recorder.)
 
-All commands use the self-contained [`glowtact_camera`](../glowtact_camera/)
+All commands use the self-contained `glowtact.camera` (the `glowtact-camera` console script)
 package, which depends on only OpenCV + NumPy and works both inside this project
-and copied elsewhere. See its [package README](../glowtact_camera/README.md)
+and copied elsewhere. See the library README
 for the library API.
 
 - [1. Connect and find the sensor](#1-connect-and-find-the-sensor)
@@ -26,7 +26,7 @@ Plug the GlowTact into USB, then:
 
 ```bash
 cd TheProbe/ProbingPi
-python -m glowtact_camera list
+glowtact-camera list
 ```
 
 Expected:
@@ -53,7 +53,7 @@ one delivers frames; `list` probes and reports which.
 A live window (needs a display; run locally, not over plain SSH):
 
 ```bash
-python -m glowtact_camera view --diff dark
+glowtact-camera view --diff dark
 ```
 
 Keys: `b` set baseline (untouched), `s` save a frame to the current directory,
@@ -67,7 +67,7 @@ The main workflow: a live window whose keys save snapshots and video into a
 timestamped session folder you choose.
 
 ```bash
-python -m glowtact_camera capture -d ~/glowtact_captures
+glowtact-camera capture -d ~/glowtact_captures
 ```
 
 | key | action |
@@ -110,14 +110,14 @@ Non-interactive, for scripting:
 
 ```bash
 # a single raw frame
-python -m glowtact_camera snapshot -o shot.png
+glowtact-camera snapshot -o shot.png
 
 # a single dark-diff frame: captures a baseline, waits --delay, then shoots
-python -m glowtact_camera snapshot -o contact.png --diff dark --delay 3
+glowtact-camera snapshot -o contact.png --diff dark --delay 3
 
 # a fixed-length clip (default 10 s, real-time fps)
-python -m glowtact_camera record -o clip.avi --duration 10
-python -m glowtact_camera record -o clip.avi --duration 10 --diff dark
+glowtact-camera record -o clip.avi --duration 10
+glowtact-camera record -o clip.avi --duration 10 --diff dark
 ```
 
 ---
@@ -128,7 +128,7 @@ Headless-friendly — no display needed. Serves MJPEG over HTTP; one camera fans
 out to many viewers.
 
 ```bash
-python -m glowtact_camera serve --port 8000 --diff dark
+glowtact-camera serve --port 8000 --diff dark
 ```
 
 Open `http://<host>:8000/` in any browser. `Ctrl-C` to stop.
@@ -180,11 +180,11 @@ pipelines live in `scripts/touchnet_reconstruct.py` and
 
 | symptom | fix |
 |---------|-----|
-| `no GlowTact (1e45:8022) found` | check the cable; `python -m glowtact_camera list`; for a 120° unit pass `--vendor/--product`; on macOS/Windows use `--index N` |
+| `no GlowTact (1e45:8022) found` | check the cable; `glowtact-camera list`; for a 120° unit pass `--vendor/--product`; on macOS/Windows use `--index N` |
 | `found … but none delivered frames` | the camera is **busy** — another `serve`/`view`/`capture`/server has it open. Close that first. (`fuser /dev/video2` shows who holds it.) |
 | window doesn't open over SSH | `view`/`capture` need a display. Use `serve` (browser) or the one-shot `snapshot`/`record` instead. |
 | diff is all grey / black | set a baseline with the gel untouched (`b`), then touch the gel |
 | USB auto-discovery unavailable | Linux-only; pass `--index N`. `pip install pyudev` makes discovery more robust but a `/sys` fallback works without it. |
 
-See also: [`glowtact_camera/README.md`](../glowtact_camera/README.md) (library
+See also: the library README (
 API), [`docs/data_format.md`](data_format.md) (dataset layout).

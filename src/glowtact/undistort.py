@@ -857,7 +857,6 @@ def _walk_grid(pts, rows, cols):
     right / down from here", which stays well-defined however the lens warps
     the global picture. Returns {point index: (i, j)} in un-normalised indices.
     """
-    n = len(pts)
     diff = pts[:, None, :] - pts[None, :, :]
     dist = np.hypot(diff[:, :, 0], diff[:, :, 1])
     np.fill_diagonal(dist, np.inf)
@@ -1395,6 +1394,7 @@ def cmd_calibrate(args):
     import cv2
 
     from .capture import open_live
+    from .diffio import render_difference, signed_difference
 
     live = open_live(args.camera, args.config, buffer=4, fresh_reads=1)
     camera_id, reader = live.camera_id, live.reader
@@ -1427,8 +1427,8 @@ def cmd_calibrate(args):
             if baseline is None:
                 baseline = frame.copy()
 
-            signed = mc.signed_difference(frame, baseline)
-            view = (mc.render_difference(signed, args.diff_gain)
+            signed = signed_difference(frame, baseline)
+            view = (render_difference(signed, args.diff_gain)
                     if signed is not None else frame.copy())
 
             # Detection is expensive; every Nth frame keeps the view fluid.

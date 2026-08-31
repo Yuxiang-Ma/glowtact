@@ -4,7 +4,7 @@ The GelSight Mini prints tracking dots to measure shear; the GlowTact has none.
 But its gel carries a faint **natural speckle** texture, and when contact shears
 the gel tangentially that whole speckle field translates. Tracking the speckle
 gives a **marker-free shear estimate** — implemented in
-[`glowtact_camera/shear.py`](../glowtact_camera/shear.py) with four algorithms
+`glowtact.shear` with four algorithms
 and a ground-truth-free evaluation.
 
 ## The two hard problems
@@ -33,7 +33,7 @@ shear from the untouched state — the quantity that tracks shear force.
 ## Automatic evaluation (no ground truth)
 
 There is no force label, so quality is judged by four self-supervised metrics in
-[`scripts/glowtact/shear_eval.py`](../scripts/glowtact/shear_eval.py):
+`glowtact-shear-eval` (`glowtact.tools.shear_eval`):
 
 - **`warp_residual`** — warp the current frame by the estimated shear and
   compare to baseline over the speckle region, as a fraction of the no-shift
@@ -86,18 +86,18 @@ force). The evaluation harness will then exercise `warp_residual` meaningfully.
 
 ```bash
 # evaluate every clip in a session -> metrics.json + comparison/series/overlay PNGs
-python scripts/glowtact/shear_eval.py ~/glowtact_captures/session_YYYYMMDD_HHMMSS
+glowtact-shear-eval ~/glowtact_captures/session_YYYYMMDD_HHMMSS
 
 # faster (every other frame), or a subset of trackers / explicit videos
-python scripts/glowtact/shear_eval.py <session> --stride 2 --trackers phasecorr lk
-python scripts/glowtact/shear_eval.py --videos a.avi b.avi --out shear_out
+glowtact-shear-eval <session> --stride 2 --trackers phasecorr lk
+glowtact-shear-eval --videos a.avi b.avi --out shear_out
 ```
 
 Library use (the recommended tracker on a live/recorded stream):
 
 ```python
 import cv2
-from glowtact_camera import shear
+from glowtact import shear
 
 cap = cv2.VideoCapture("clip.avi")
 _, f0 = cap.read()
@@ -120,7 +120,7 @@ vector, `shear.shear_field()` lays a virtual marker grid over the speckle and
 estimates each node's local displacement:
 
 ```bash
-python scripts/glowtact/shear_field_render.py <session_dir>   # arrow-field MP4s
+glowtact-shear-field <session_dir>   # arrow-field MP4s
 ```
 
 ```python
@@ -141,7 +141,7 @@ divergent** = normal press, **uniform-directional** = shear, **curl** = torsion.
 ## 180° fisheye correction + centre crop
 
 The GlowTact's 180° lens barrel-distorts the view and frames it in a black rim.
-`scripts/glowtact/fisheye.py` flattens it without a calibration grid (the repo's
+`glowtact.fisheye` flattens it without a calibration grid (the repo's
 `undistort_map.yaml` was fit on a *different* unit and lands rotated/off-centre
 here): it auto-detects the illuminated gel disc, treats the lens as equidistant
 (`r_img = f·θ`), and reprojects the central field to a pinhole, keeping ~100° so
@@ -149,9 +149,9 @@ the square output sits fully inside the disc — flattening the distortion and
 removing the rim/corners in one remap.
 
 ```bash
-python scripts/glowtact/undistort_video.py <session_dir>          # plain corrected clips
-python scripts/glowtact/shear_field_render.py <session_dir> --undistort   # corrected field
-python scripts/glowtact/shear_render.py      <session_dir> --undistort   # corrected global
+glowtact-undistort-video <session_dir>          # plain corrected clips
+glowtact-shear-field <session_dir> --undistort   # corrected field
+glowtact-shear-render<session_dir> --undistort   # corrected global
 ```
 
 `--keep-fov` (default 100°) sets the crop tightness; when `--undistort` is on the
@@ -168,4 +168,4 @@ render scripts use a full-frame FOV since the rim is already gone.
    indentation intrusion, if you need a dense field rather than a global vector.
 
 See also: [`docs/glowtact_sensor.md`](glowtact_sensor.md) (capturing data),
-[`glowtact_camera/README.md`](../glowtact_camera/README.md) (package API).
+the library README (package API).
