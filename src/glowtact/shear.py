@@ -572,13 +572,30 @@ class ShearField:
 
     # -- rigid fit & slip -----------------------------------------------------
 
-    def residual_field(self, min_conf=0.12):
+    #: Residual (px) within which a node counts as consistent with a candidate
+    #: body motion in the consensus fit: the no-contact residual jitter is
+    #: 0.17-0.24 px, so 0.35 clears it while still separating a patch that
+    #: slid by half a pixel.
+    CONSENSUS_INLIER_PX = 0.35
+
+    def residual_field(self, min_conf=0.12, robust=True, samples=300, seed=0):
         """Per-node flow minus the best-fit AFFINE (translation+rotation+stretch).
 
         A press deforms the gel smoothly (bulk shift, rotation, radial stretch)
         -- all affine, and none of it is slip. What remains after removing the
-        best affine map is the local NON-smooth motion: a patch that grips vs a
-        patch that slides. Returns (res_x, res_y, good).
+        body's affine map is the local NON-smooth motion: a patch that grips vs
+        a patch that slides. Returns (res_x, res_y, good).
+
+        The body is found by CONSENSUS (RANSAC over 3-node samples, inliers
+        within CONSENSUS_INLIER_PX, then least squares on the inlier set), not
+        by a plain least-squares fit over every node. Measured on a synthetic
+        press where a rim patch on one side slid 2 px relative to the body:
+        the plain fit explained the patch as a stretch term (dvx/dx) and left
+        ~0.5 px of residual uniformly on BOTH populations, so no node stood out
+        -- and an IRLS/Huber polish could not escape that basin either, since
+        it starts from the contaminated solution. Maximising the number of
+        nodes explained to within noise picks the body (the coherent majority)
+        and leaves the patch as the residual.
         """
         good = self.conf >= min_conf
         if good.sum() < 6:
@@ -588,8 +605,34 @@ class ShearField:
         c = self.nodes.mean(0)
         px, py = (p - c).T
         A = np.column_stack([px, py, np.ones(len(p))])       # affine basis
-        cx = np.linalg.lstsq(A, self.vecs[good, 0], rcond=None)[0]
-        cy = np.linalg.lstsq(A, self.vecs[good, 1], rcond=None)[0]
+        vx, vy = self.vecs[good, 0], self.vecs[good, 1]
+
+        def fit(rows):
+            cx = np.linalg.lstsq(A[rows], vx[rows], rcond=None)[0]
+            cy = np.linalg.lstsq(A[rows], vy[rows], rcond=None)[0]
+            return cx, cy
+
+        cx, cy = fit(slice(None))
+        if robust and len(p) >= 12:
+            rng = np.random.default_rng(seed)
+            best = -1
+            for _ in range(samples):
+                idx = rng.choice(len(p), 3, replace=False)
+                if abs(np.linalg.det(A[idx])) < 1e-6:        # collinear
+                    continue
+                sx, sy = fit(idx)
+                r = np.hypot(vx - A @ sx, vy - A @ sy)
+                inliers = r <= self.CONSENSUS_INLIER_PX
+                n_in = int(inliers.sum())
+                if n_in > best:
+                    best, best_in = n_in, inliers
+            if best >= 6:
+                cx, cy = fit(best_in)
+                # one re-selection on the refined model tightens the set
+                r = np.hypot(vx - A @ cx, vy - A @ cy)
+                inliers = r <= self.CONSENSUS_INLIER_PX
+                if inliers.sum() >= 6:
+                    cx, cy = fit(inliers)
         allpx, allpy = (self.nodes - c).T
         allA = np.column_stack([allpx, allpy, np.ones(len(self.nodes))])
         res_x = np.zeros(len(self.nodes))
@@ -610,6 +653,127 @@ class ShearField:
         if good.sum() < 6:
             return 0.0
         return float(np.sqrt(np.mean(rx[good] ** 2 + ry[good] ** 2)))
+
+    # -- slip area: where the contact slides vs where it grips ----------------
+
+    #: Non-affine residual (px) a node must exceed to count as slipping. The
+    #: no-contact residual jitter on this sensor is 0.17-0.24 px (see
+    #: MOTION_FLOOR_PX); a grid node must move 2x that away from the smooth
+    #: bulk deformation before it is called slip, not noise.
+    SLIP_RESIDUAL_PX = 0.5
+
+    def _node_contact(self, contact, dilate_cells=1.0):
+        """Bool per node: inside the (pixel) contact mask, grown by cells.
+
+        The speckle is wiped out INSIDE the imprint, so the nodes that carry
+        the slip signal sit on its rim; growing the mask by about one grid
+        step keeps that ring in the population being judged.
+        """
+        if contact is None:
+            return np.ones(len(self.nodes), bool)
+        import cv2
+
+        rows, cols = self.grid
+        step = float(np.median(np.diff(np.unique(self.nodes[:, 0])))) \
+            if cols > 1 else 1.0
+        k = int(max(1, round(dilate_cells * step)))
+        grown = cv2.dilate(contact.astype(np.uint8),
+                           np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        ni = np.clip(self.nodes.astype(int), 0, None)
+        ni[:, 0] = np.minimum(ni[:, 0], grown.shape[1] - 1)
+        ni[:, 1] = np.minimum(ni[:, 1], grown.shape[0] - 1)
+        return grown[ni[:, 1], ni[:, 0]] > 0
+
+    def slip_mask(self, min_conf=0.12, thresh=None, contact=None):
+        """Per-node slip flags from the non-affine residual. -> (mask, res_mag)
+
+        Cattaneo-Mindlin partial slip: the smooth (affine) part of the field is
+        the gel deforming as one body -- grip. What is left is a patch moving
+        relative to that body -- the sliding region. A node is flagged when its
+        residual magnitude exceeds ``thresh`` (default SLIP_RESIDUAL_PX); with a
+        pixel ``contact`` mask only nodes on / next to the imprint are eligible,
+        so texture noise far from the object cannot register as slip.
+        """
+        thresh = self.SLIP_RESIDUAL_PX if thresh is None else float(thresh)
+        rx, ry, good = self.residual_field(min_conf)
+        mag = np.hypot(rx, ry)
+        eligible = good & self._node_contact(contact)
+        return (eligible & (mag > thresh)), mag
+
+    def slip_area(self, min_conf=0.12, thresh=None, contact=None):
+        """Slipping fraction of the contact and its Cattaneo annularity.
+
+        Returns a dict:
+          n_contact    trusted nodes in / around the imprint
+          n_slip       of those, flagged as slipping
+          slip_frac    n_slip / n_contact (0 = full grip, 1 = gross slip)
+          stick_ratio  1 - slip_frac -- the HCI/robotics "stick ratio" whose
+                       collapse toward 0 is the incipient-slip predictor
+          annularity   mean normalised radius (0 centre .. 1 rim) of the
+                       slipping nodes within the contact population. Partial
+                       slip physically starts at the RIM and grows inward, so
+                       a value well above 0.5 says the flagged nodes form the
+                       expected annulus rather than scattered noise; NaN when
+                       nothing slips.
+        """
+        mask, _mag = self.slip_mask(min_conf, thresh, contact)
+        good = (self.conf >= min_conf) & self._node_contact(contact)
+        n_contact = int(good.sum())
+        n_slip = int(mask.sum())
+        frac = n_slip / n_contact if n_contact else 0.0
+        annularity = float("nan")
+        if n_slip and n_contact >= 3:
+            pts = self.nodes[good]
+            centre = pts.mean(0)
+            r = np.hypot(*(self.nodes - centre).T)
+            r_max = max(float(r[good].max()), 1e-6)
+            annularity = float((r[mask] / r_max).mean())
+        return {"n_contact": n_contact, "n_slip": n_slip,
+                "slip_frac": float(frac), "stick_ratio": float(1.0 - frac),
+                "annularity": annularity}
+
+    # -- friction cone: tangential / normal per node ----------------------------
+
+    def traction_ratio(self, pressure, min_conf=0.12, win=None, floor=None):
+        """Per-node |shear| / pressure -- the local friction-cone loading.
+
+        ``pressure`` is a per-pixel map of the normal loading: reconstructed
+        depth (mm) when a darkness->depth LUT exists for the unit, otherwise
+        the darkening image itself (baseline - frame, >= 0), which is a
+        monotonic proxy. It is averaged over a ``win`` x ``win`` box around
+        each node. Nodes where the pressure is below ``floor`` (default: 2% of
+        the map's 99th percentile) have no normal load to divide by and come
+        back NaN -- there the ratio is undefined, not infinite. Coulomb slip
+        occurs where the ratio exceeds the friction coefficient; the ratio's
+        units are px per pressure-unit, so ``mu`` must be calibrated on this
+        sensor from a known gross-slip event.
+        """
+        import cv2
+
+        p = np.asarray(pressure, dtype=np.float32)
+        rows, cols = self.grid
+        step = float(np.median(np.diff(np.unique(self.nodes[:, 0])))) \
+            if cols > 1 else 41.0
+        k = int(win if win is not None else step)
+        k = max(3, k | 1)
+        local = cv2.blur(p, (k, k))
+        ni = self.nodes.astype(int)
+        ni[:, 0] = np.clip(ni[:, 0], 0, p.shape[1] - 1)
+        ni[:, 1] = np.clip(ni[:, 1], 0, p.shape[0] - 1)
+        pn = local[ni[:, 1], ni[:, 0]]
+        if floor is None:
+            floor = 0.02 * float(np.percentile(p, 99)) if p.size else 0.0
+        mag = np.hypot(self.vecs[:, 0], self.vecs[:, 1])
+        ratio = np.full(len(self.nodes), np.nan)
+        ok = (self.conf >= min_conf) & (pn > max(floor, 1e-9))
+        ratio[ok] = mag[ok] / pn[ok]
+        return ratio
+
+    def friction_cone_mask(self, pressure, mu, min_conf=0.12, win=None,
+                           floor=None):
+        """Nodes whose traction ratio exceeds ``mu``: predicted Coulomb slip."""
+        ratio = self.traction_ratio(pressure, min_conf, win, floor)
+        return np.isfinite(ratio) & (ratio > mu), ratio
 
     # -- fill the contact hole ------------------------------------------------
 

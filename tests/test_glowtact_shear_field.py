@@ -105,3 +105,69 @@ def test_mean_is_confidence_weighted_and_ignores_the_hole():
     vecs[:10] = [50.0, 50.0]
     f = _field(vecs, conf)
     assert f.mean() == pytest.approx((1.0, -2.0))
+
+
+# -- slip area / friction cone ------------------------------------------------
+
+def test_smooth_affine_deformation_is_all_grip():
+    """A press that shifts, twists and stretches the gel as one body slips nowhere."""
+    rows, cols = 9, 9
+    ys, xs = np.mgrid[0:rows, 0:cols].astype(float)
+    dx = 1.5 + 0.08 * (xs - 4) - 0.05 * (ys - 4)      # shift + stretch + twist
+    dy = -0.6 + 0.05 * (xs - 4) + 0.08 * (ys - 4)
+    f = _field(np.stack([dx.ravel(), dy.ravel()], 1))
+    mask, _ = f.slip_mask()
+    assert not mask.any()
+    stats = f.slip_area()
+    assert stats["stick_ratio"] == 1.0 and stats["n_slip"] == 0
+    assert np.isnan(stats["annularity"])
+
+
+def test_rim_patch_sliding_against_the_bulk_is_the_slip_area():
+    """Cattaneo-Mindlin: nodes at the rim moving relative to the body are slip."""
+    rows, cols = 11, 11
+    ys, xs = np.mgrid[0:rows, 0:cols].astype(float)
+    n = rows * cols
+    vec = np.stack([np.full(n, 1.0), np.full(n, 0.0)], 1)     # body: rigid shift
+    r = np.hypot(xs - 5, ys - 5)
+    # Slip begins on ONE edge of the contact (the trailing side under a
+    # tangential load): a rim patch on the right, a minority of the nodes.
+    rim = ((r >= 3.5) & (xs > 7)).ravel()
+    assert 0.1 < rim.mean() < 0.35
+    vec[rim, 0] += 2.0                                       # patch slides on
+    f = _field(vec, grid=(rows, cols))
+    mask, mag = f.slip_mask()
+    assert mask[rim].mean() > 0.9 and mask[~rim].mean() < 0.05
+    stats = f.slip_area()
+    assert abs(stats["slip_frac"] - rim.mean()) < 0.05
+    assert stats["annularity"] > 0.7                         # sits at the rim
+    # The plain least-squares affine is pulled by the patch and misfires:
+    rx, _ry, _ = f.residual_field(robust=False)
+    assert np.abs(rx[~rim]).mean() > 0.3                     # body contaminated
+
+
+def test_slip_area_only_counts_nodes_on_the_contact():
+    """A stray outlier far from the imprint must not register as slip."""
+    vec = np.zeros((81, 2)); vec[0] = (4.0, 0.0)              # lone corner node
+    f = _field(vec)
+    contact = np.zeros((240, 240), bool)
+    contact[90:130, 90:130] = True                           # centre imprint
+    assert f.slip_mask()[0][0]                               # no mask: flagged
+    assert not f.slip_mask(contact=contact)[0][0]            # gated: ignored
+    assert f.slip_area(contact=contact)["n_contact"] < 81
+
+
+def test_traction_ratio_divides_shear_by_local_pressure():
+    """|shear| / pressure per node, NaN where there is nothing pressing."""
+    pytest.importorskip("cv2")
+    vec = np.stack([np.full(81, 2.0), np.zeros(81)], 1)
+    f = _field(vec)
+    pressure = np.zeros((240, 240), np.float32)
+    pressure[:, :120] = 50.0                                 # left half loaded
+    ratio = f.traction_ratio(pressure, win=5)
+    left = f.nodes[:, 0] < 100
+    right = f.nodes[:, 0] > 140
+    assert np.allclose(ratio[left], 2.0 / 50.0, rtol=1e-3)
+    assert np.isnan(ratio[right]).all()
+    cone, _ = f.friction_cone_mask(pressure, mu=0.03, win=5)
+    assert cone[left].all() and not cone[right].any()

@@ -74,14 +74,34 @@ def _quiet_background(gray, denoise=True, fade=0.55):
     return vis.astype(np.uint8)
 
 
+SLIP_BGR = (40, 40, 230)          # slipping node + its cell: red
+CONE_BGR = (0, 140, 255)          # traction ratio above mu: orange ring
+
+
 def _draw_field(gray, field, contact, scale, min_conf, cap=None,
-                filled_mask=None, slip=None, bg_denoise=True, bg_fade=0.55):
+                filled_mask=None, slip=None, bg_denoise=True, bg_fade=0.55,
+                slip_nodes=None, slip_stats=None, cone_nodes=None):
+    """One panel. ``slip_nodes`` (bool per node) shades each slipping node's
+    grid cell red -- the slippage AREA -- and ``cone_nodes`` rings the nodes
+    whose traction ratio exceeds mu; ``slip_stats`` (from
+    ShearField.slip_area) goes on the banner as the stick ratio."""
     import cv2
 
     vis = _quiet_background(gray, bg_denoise, bg_fade)
     cnts, _ = cv2.findContours(contact.astype(np.uint8), cv2.RETR_EXTERNAL,
                                cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(vis, cnts, -1, (0, 0, 255), 1)
+
+    if slip_nodes is not None and slip_nodes.any():
+        # Shade the slipping nodes' cells so the sliding REGION reads as an
+        # area, not a scatter of red dots; translucent so the imprint shows.
+        xs = np.unique(field.nodes[:, 0])
+        half = int(round((np.median(np.diff(xs)) if len(xs) > 1 else 26) / 2))
+        layer = vis.copy()
+        for (x, y) in field.nodes[slip_nodes]:
+            cv2.rectangle(layer, (int(x) - half, int(y) - half),
+                          (int(x) + half, int(y) + half), SLIP_BGR, -1)
+        vis = cv2.addWeighted(layer, 0.35, vis, 0.65, 0)
 
     if filled_mask is None:
         filled_mask = np.zeros(len(field.nodes), bool)
@@ -97,8 +117,12 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
                 ax, ay = ax * cap / L, ay * cap / L
         tip = (int(x + ax), int(y + ay))
         colour = FILLED_BGR if filled_mask[i] else _color(c)
+        if slip_nodes is not None and slip_nodes[i]:
+            colour = SLIP_BGR
         cv2.arrowedLine(vis, (int(x), int(y)), tip, colour, 1,
                         tipLength=0.35, line_type=cv2.LINE_AA)
+        if cone_nodes is not None and cone_nodes[i]:
+            cv2.circle(vis, (int(x), int(y)), 4, CONE_BGR, 1, cv2.LINE_AA)
 
     # Metrics go on a banner strip BELOW the frame, never over the gel view.
     mx, my = field.mean()
@@ -113,6 +137,10 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
             (f"spread {div:+.1f}", (0, 200, 120))]
     if slip is not None:
         rows.append((f"slip {slip:.2f}px", (80, 200, 255)))
+    if slip_stats is not None and slip_stats.get("n_contact", 0):
+        rows.append((f"stick {100 * slip_stats['stick_ratio']:.0f}%"
+                     f" ({slip_stats['n_slip']}/{slip_stats['n_contact']})",
+                     SLIP_BGR))
     x = 8
     for text, colour in rows:
         cv2.putText(banner, text, (x, 15), F, 0.42, colour, 1, cv2.LINE_AA)
@@ -121,6 +149,9 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
     # 0.32 the long form is 512 px wide and a 494 px frame silently clipped
     # "slip=non-affine residual" off the right edge of every rendered video.
     legends = ["slide=mean tangential shift  twist=rotation x1e3  "
+               "spread=push-out x1e3  slip=non-affine residual  "
+               "stick=gripping share of contact (red cells slide)",
+               "slide=mean tangential shift  twist=rotation x1e3  "
                "spread=push-out x1e3  slip=non-affine residual",
                "slide=mean shift  twist=rotation x1e3  "
                "spread=push-out x1e3  slip=non-affine",
@@ -142,7 +173,8 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
 def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
            min_conf=0.10, fps=None, undistort=False, keep_fov=100.0,
            out_size=480, calib=None, coherence=True, max_dev=1.5, fill=True,
-           slip=True, panel_dir=None, variants=None):
+           slip=True, panel_dir=None, variants=None, slip_thresh=None,
+           mu=None, slip_area=True):
     """``scale=None`` auto-sizes arrows so the 90th-pct one is ~0.9 grid cells.
 
     Real shear is only 1-3 px, so arrows must be magnified to be seen; auto
@@ -174,15 +206,35 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
     # Apply the GelSight-style clean-up: reject spring-incoherent nodes, then
     # fill the enclosed contact hole; keep the slip index per frame.
     fields, masks, fills, slips = [], [], [], []
+    slip_nodes, slip_stats, cone_nodes, traction = [], [], [], []
     for i, g in enumerate(frames):
         if i == 0:
             continue
-        masks.append(shear.contact_mask(g, base))
+        cm = shear.contact_mask(g, base)
+        masks.append(cm)
         fld = shear.shear_field(base, g, spacing=spacing, win=win,
                                 method=method, fov=fov)
         if coherence:
             fld = fld.filter_coherence(min_conf, max_dev=max_dev)
         slips.append(fld.slip_index(min_conf) if slip else None)
+        if slip_area:
+            # Slip AREA on the coherence-filtered (unfilled) field: filled
+            # nodes are interpolated, so they carry no slip evidence.
+            sm, _ = fld.slip_mask(min_conf, slip_thresh, contact=cm)
+            slip_nodes.append(sm)
+            slip_stats.append(fld.slip_area(min_conf, slip_thresh, contact=cm))
+            # Normal-load proxy: darkening of the gel (baseline - frame).
+            pressure = np.clip(base.astype(np.int16) - g.astype(np.int16),
+                               0, 255).astype(np.float32)
+            ratio = fld.traction_ratio(pressure, min_conf, win=win)
+            finite = ratio[np.isfinite(ratio)]
+            traction.append(float(np.percentile(finite, 90))
+                            if finite.size else float("nan"))
+            cone_nodes.append(np.isfinite(ratio) & (ratio > mu)
+                              if mu is not None else None)
+        else:
+            slip_nodes.append(None); slip_stats.append(None)
+            cone_nodes.append(None); traction.append(None)
         if fill:
             fld, fmask = fld.fill(min_conf)
         else:
@@ -214,12 +266,15 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
                else tempfile.mkdtemp(prefix="shear_field_"))
         os.makedirs(tmp, exist_ok=True)
         try:
-            for k, (field, cm, fmask, sl) in enumerate(
-                    zip(fields, masks, fills, slips), start=1):
+            for k, (field, cm, fmask, sl, sn, ss, cn) in enumerate(
+                    zip(fields, masks, fills, slips, slip_nodes, slip_stats,
+                        cone_nodes), start=1):
                 panel = _draw_field(frames[k], field, cm, scale, min_conf,
                                     cap=cap_len, filled_mask=fmask, slip=sl,
                                     bg_denoise=v.get("denoise", True),
-                                    bg_fade=v.get("fade", 0.55))
+                                    bg_fade=v.get("fade", 0.55),
+                                    slip_nodes=sn, slip_stats=ss,
+                                    cone_nodes=cn)
                 cv2.imwrite(os.path.join(tmp, f"{k:05d}.png"), panel)
             os.makedirs(os.path.dirname(v["out"]) or ".", exist_ok=True)
             _encode(tmp, v["out"], fps)
@@ -240,6 +295,13 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
         "contact_area": [float(m.mean()) for m in masks],
         "slip": [None if s_ is None else float(s_) for s_ in slips],
         "shear_px": [[float(v) for v in f.mean()] for f in fields],
+        "stick_ratio": [None if s is None else s["stick_ratio"]
+                        for s in slip_stats],
+        "slip_frac": [None if s is None else s["slip_frac"]
+                      for s in slip_stats],
+        "annularity": [None if s is None else s["annularity"]
+                       for s in slip_stats],
+        "traction_p90": traction,
     }
 
 
@@ -298,6 +360,14 @@ def main(argv=None):
                     help="do not interpolate across the contact hole")
     ap.add_argument("--no-slip", action="store_true",
                     help="do not overlay the slip index")
+    ap.add_argument("--no-slip-area", action="store_true",
+                    help="do not shade the slipping region / stick ratio")
+    ap.add_argument("--slip-thresh", type=float, default=None,
+                    help="non-affine residual (px) that flags a node as "
+                         "slipping (default ShearField.SLIP_RESIDUAL_PX)")
+    ap.add_argument("--mu", type=float, default=None,
+                    help="friction-cone threshold on |shear|/darkening; ring "
+                         "the nodes above it (needs calibrating per sensor)")
     args = ap.parse_args(argv)
     if args.calib == "__default180__":
         args.calib = fisheye.DEFAULT_CALIB_180
@@ -323,7 +393,9 @@ def main(argv=None):
                undistort=args.undistort, keep_fov=args.keep_fov,
                out_size=args.out_size, calib=args.calib,
                coherence=not args.no_coherence, max_dev=args.max_dev,
-               fill=not args.no_fill, slip=not args.no_slip)
+               fill=not args.no_fill, slip=not args.no_slip,
+               slip_area=not args.no_slip_area, slip_thresh=args.slip_thresh,
+               mu=args.mu)
     print(f"outputs -> {out_dir}")
     return 0
 
