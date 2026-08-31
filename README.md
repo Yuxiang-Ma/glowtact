@@ -32,6 +32,7 @@ pip install -e '.[dev]' && pytest
 | `glowtact.shear` | shear-field trackers (LK, Farneback, DIS, phase-correlation), `ShearField`, quality scores |
 | `glowtact.clean_diff`, `glowtact.enhance_diff` | membrane-shift suppression; display band-pass — `glowtact-clean-diff`, `glowtact-enhance-diff` |
 | `glowtact.render`, `glowtact.figure` | height-map meshes, baked relief shading, turntables, paper-style figure panels |
+| `glowtact.force` | normal force from darkening images: features + calibrations that carry their own leave-one-out error |
 | `glowtact.crop`, `glowtact.imgfilt`, `glowtact.mask` | pad crops / rotation bounds, DoG filters, the circular aperture mask |
 | `glowtact.tools` | `glowtact-undistort-video`, `glowtact-shear-render`, `glowtact-shear-field`, `glowtact-shear-eval` |
 | `glowtact.calib` | shipped per-unit undistortion maps (`glowtact.calib_path("glowtact180", ...)`) |
