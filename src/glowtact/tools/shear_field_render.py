@@ -182,9 +182,16 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
            min_conf=0.10, fps=None, undistort=False, keep_fov=100.0,
            out_size=480, calib=None, coherence=True, max_dev=1.5, fill=True,
            slip=True, panel_dir=None, variants=None, slip_thresh=None,
-           mu=None, slip_area=True, slip_mode="temporal", lag=1,
-           local_ref=False, smooth=1):
+           mu=None, slip_area=True, slip_mode="temporal", lag=2,
+           local_ref=True, smooth=5):
     """``scale=None`` auto-sizes arrows so the 90th-pct one is ~0.9 grid cells.
+
+    The slip defaults (lag 2, local gel reference, 5-frame verdict median)
+    are the winner of a 28-configuration sweep on the five shear clips scored
+    against an independent block-matching reference: verdict F1 0.62 -> 0.66,
+    split-half reliability of the partition 0.58 -> 0.63, verdict chatter
+    0.37 -> 0.10 flips/frame. LK in place of dense flow was clearly worse;
+    lag 3 and heavier smoothing traded F1 for steadiness.
 
     Real shear is only 1-3 px, so arrows must be magnified to be seen; auto
     scaling keeps them legible without the overlap that a fixed factor causes.
@@ -427,13 +434,16 @@ def main(argv=None):
                     help="temporal: imprint moving relative to the gel "
                          "between frames (default); spatial: non-affine "
                          "residual on the contact patch")
-    ap.add_argument("--lag", type=int, default=1,
+    ap.add_argument("--lag", type=int, default=2,
                     help="frames between the two images the relative motion "
                          "is measured over (raises signal above flow noise)")
-    ap.add_argument("--local-ref", action="store_true",
+    ap.add_argument("--local-ref", dest="local_ref", action="store_true",
+                    default=True,
                     help="reference each imprint node to its nearest gel "
-                         "nodes instead of one ring-wide median")
-    ap.add_argument("--smooth", type=int, default=1,
+                         "nodes instead of one ring-wide median (default)")
+    ap.add_argument("--global-ref", dest="local_ref", action="store_false",
+                    help="one ring-wide median gel reference")
+    ap.add_argument("--smooth", type=int, default=5,
                     help="odd median window (frames) on the sliding verdict")
     ap.add_argument("--fade", type=float, default=0.0,
                     help="fade the gel toward white for display (0 = as "
