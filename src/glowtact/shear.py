@@ -852,7 +852,7 @@ SLIP_VELOCITY_PX = 0.5
 
 def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
                   fov=None, min_conf=0.10, thresh=None, ring_px=45,
-                  method="flow"):
+                  method="flow", local_ref=False):
     """Slip as MOTION of the imprint relative to the gel -- per node, per frame.
 
     Why temporal, not spatial: on a marker-less gel the interior of the
@@ -865,45 +865,55 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
     of how the gel deforms, which is what defeats the spatial (non-affine
     residual) view: a soft fingertip deforms non-affinely without slipping.
 
-    Args:
-      prev_gray, cur_gray: consecutive frames.
-      contact: bool pixel mask of the imprint (shear.contact_mask).
-      ring_px: the gel reference is the median velocity of confident nodes
-        within this distance outside the imprint.
-      thresh: relative speed (px/frame) flagging slip; default
-        SLIP_VELOCITY_PX.
-
-    Returns a dict:
-      field        the frame-to-frame ShearField (object texture tracked too)
-      inside       bool per node: node lies on the imprint
-      rel          per-node |v_node - v_gel| (px/frame), NaN off the imprint
-      slip         bool per node: inside, confident, rel > thresh
-      v_obj        median velocity of the confident imprint nodes (dx, dy)
-      v_gel        median velocity of the ring nodes (dx, dy)
-      n_contact    confident imprint nodes
-      n_slip       of those, sliding
-      slip_frac / stick_ratio
-      slip_area_px  approx sliding area (cells x spacing^2), clipped to the
-                    imprint's pixel area
-      noise / gate  this frame's far-gel flow scatter and the per-node gate
-                    derived from it (max(thresh, 2 * noise))
-      rel_speed     |v_obj - v_gel| (px/frame), the robust aggregate
-      sliding       frame verdict: rel_speed above max(1.5*thresh, 2.5*noise)
+    ``prev_gray`` may be several frames back (a lag) to raise the signal
+    above the per-node flow noise. See :func:`slip_from_field` for the
+    verdict logic and the returned dict.
     """
-    import cv2
-
-    thresh = SLIP_VELOCITY_PX if thresh is None else float(thresh)
     # smooth=False: the 3x3 grid median would blend imprint nodes with the
     # gel across the contact boundary -- exactly the contrast this measures.
     field = shear_field(prev_gray, cur_gray, spacing=spacing, win=win,
                         method=method, fov=fov, smooth=False)
+    return slip_from_field(field, contact, spacing=spacing, win=win,
+                           min_conf=min_conf, thresh=thresh, ring_px=ring_px,
+                           local_ref=local_ref)
+
+
+def slip_from_field(field, contact, spacing=26, win=41, min_conf=0.10,
+                    thresh=None, ring_px=45, local_ref=False):
+    """The slip verdict for an already-computed frame-to-frame field.
+
+    Args:
+      field: ShearField of the CURRENT frame vs an earlier one.
+      contact: bool pixel mask of the imprint (shear.contact_mask).
+      ring_px: the gel reference comes from confident nodes within this
+        distance outside the imprint.
+      thresh: relative speed (px/frame) flagging slip; default
+        SLIP_VELOCITY_PX.
+      local_ref: reference each imprint node against the gel nodes NEAREST
+        to it (inverse-distance weighted) instead of one ring-wide median,
+        so a rotating or unevenly dragged gel is not misread as slip.
+
+    Returns a dict:
+      field / inside / rel / slip / v_obj / v_gel / n_contact / n_slip /
+      slip_frac / stick_ratio / slip_area_px  -- as documented in the code
+      noise / gate  this frame's far-gel flow scatter and the per-node gate
+                    derived from it (max(thresh, 2 * noise))
+      rel_speed     |v_obj - v_gel| (px/frame), the robust aggregate
+      sliding       frame verdict: rel_speed above max(1.5*thresh, 2.5*noise)
+      score         per node 0..1: how far along the gel->object velocity
+                    axis the node sits (0 stuck, 1 slipped); NaN off-imprint
+    """
+    import cv2
+
+    thresh = SLIP_VELOCITY_PX if thresh is None else float(thresh)
     contact = np.asarray(contact, bool)
     ni = field.nodes.astype(int)
     ni[:, 0] = np.clip(ni[:, 0], 0, contact.shape[1] - 1)
     ni[:, 1] = np.clip(ni[:, 1], 0, contact.shape[0] - 1)
     inside = contact[ni[:, 1], ni[:, 0]]
     dist = cv2.distanceTransform((~contact).astype(np.uint8), cv2.DIST_L2, 3)
-    ring = (~inside) & (dist[ni[:, 1], ni[:, 0]] < ring_px)
+    dnode = dist[ni[:, 1], ni[:, 0]]
+    ring = (~inside) & (dnode < ring_px)
     good = field.conf >= min_conf
 
     nan2 = np.array([np.nan, np.nan])
@@ -917,9 +927,23 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
     core_good = core & good if (core & good).any() else inside & good
     v_obj = (np.median(field.vecs[core_good], axis=0)
              if core_good.sum() >= 1 else nan2)
+
+    # Per-node gel reference: one ring-wide median, or the nearest ring
+    # nodes weighted by inverse distance (local_ref).
+    v_ref = np.tile(v_gel, (len(field.nodes), 1))
+    if local_ref and (ring & good).sum() >= 3:
+        rn = field.nodes[ring & good]
+        rv = field.vecs[ring & good]
+        rc = field.conf[ring & good]
+        for idx in np.flatnonzero(inside):
+            d = np.hypot(*(rn - field.nodes[idx]).T)
+            w = rc / np.maximum(d, spacing) ** 2
+            near = np.argsort(d)[:8]
+            v_ref[idx] = (rv[near] * w[near, None]).sum(0) / w[near].sum()
+
     rel = np.full(len(field.nodes), np.nan)
     if np.isfinite(v_gel).all():
-        d = field.vecs - v_gel
+        d = field.vecs - v_ref
         rel[inside] = np.hypot(d[inside, 0], d[inside, 1])
 
     # The per-node noise of THIS frame, read off gel the object cannot
@@ -928,7 +952,7 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
     # 0.2-0.45 px at rest, so a fixed 0.5 px gate sat inside the noise and
     # flagged 35-85% of a resting imprint; the far gel's scatter scales the
     # gate with the frame's actual flow jitter (motion blur, lighting).
-    far = (~inside) & (dist[ni[:, 1], ni[:, 0]] >= ring_px) & good
+    far = (~inside) & (dnode >= ring_px) & good
     if far.sum() >= 8:
         dev = np.hypot(*(field.vecs[far] - np.median(field.vecs[far], 0)).T)
         noise = 1.4826 * float(np.median(np.abs(dev - np.median(dev))))
@@ -947,12 +971,17 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
     # the per-node flow on object texture (fingerprint ridges: aperture
     # ambiguity) scatters by ~0.5 px/frame, 2-3x the speckle's, so a partial
     # slip smaller than the aggregate gate is not resolvable and reads 0.
+    score = np.full(len(field.nodes), np.nan)
     if sliding:
+        axis = (v_obj - v_gel) / max(rel_speed, 1e-9)
+        proj = ((field.vecs - v_ref) @ axis) / max(rel_speed, 1e-9)
+        score[inside] = np.clip(proj[inside], 0.0, 1.0)
         d_obj = np.hypot(*(field.vecs - v_obj).T)
-        d_gel = np.hypot(*(field.vecs - v_gel).T)
+        d_gel = np.hypot(*(field.vecs - v_ref).T)
         slip = inside & good & np.isfinite(rel) & (rel > gate) & (d_obj < d_gel)
     else:
         slip = np.zeros(len(field.nodes), bool)
+        score[inside] = 0.0
     # Slip is a region, not a scatter: keep a flagged node only if a grid
     # neighbour is flagged too (8-connected), which drops lone jitter hits.
     rows, cols = field.grid
@@ -971,7 +1000,7 @@ def relative_slip(prev_gray, cur_gray, contact, spacing=26, win=41,
             "n_slip": n_slip, "slip_frac": float(frac),
             "stick_ratio": float(1.0 - frac), "slip_area_px": area,
             "noise": float(noise), "gate": float(gate),
-            "rel_speed": rel_speed, "sliding": bool(sliding)}
+            "rel_speed": rel_speed, "sliding": bool(sliding), "score": score}
 
 
 def _grid_median(vecs, grid, k=1):

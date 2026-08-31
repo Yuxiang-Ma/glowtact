@@ -74,7 +74,14 @@ def _quiet_background(gray, denoise=True, fade=0.55):
     return vis.astype(np.uint8)
 
 
-SLIP_BGR = (40, 40, 230)          # slipping node + its cell: red
+SLIP_BGR = (40, 40, 230)          # slipping node: red
+STUCK_BGR = (200, 160, 0)         # imprint node moving with the gel: blue
+
+
+def _slip_color(score):
+    """0 (stuck, blue) -> 1 (slipped, red), linear in BGR."""
+    s = float(np.clip(score, 0, 1))
+    return tuple(int(round(a + (b - a) * s)) for a, b in zip(STUCK_BGR, SLIP_BGR))
 CONE_BGR = (0, 140, 255)          # traction ratio above mu: orange ring
 
 
@@ -92,16 +99,11 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
                                cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(vis, cnts, -1, (0, 0, 255), 1)
 
-    if slip_nodes is not None and slip_nodes.any():
-        # Shade the slipping nodes' cells so the sliding REGION reads as an
-        # area, not a scatter of red dots; translucent so the imprint shows.
-        xs = np.unique(field.nodes[:, 0])
-        half = int(round((np.median(np.diff(xs)) if len(xs) > 1 else 26) / 2))
-        layer = vis.copy()
-        for (x, y) in field.nodes[slip_nodes]:
-            cv2.rectangle(layer, (int(x) - half, int(y) - half),
-                          (int(x) + half, int(y) + half), SLIP_BGR, -1)
-        vis = cv2.addWeighted(layer, 0.35, vis, 0.65, 0)
+    # Slip is shown the way Yuan et al. show it: no painted regions, just the
+    # marker arrows themselves, coloured on the imprint by a continuous
+    # per-node slip score (0 = moving with the gel, 1 = moving with the
+    # object) so the sliding part of the contact reads as a heat map.
+    score = None if slip_stats is None else slip_stats.get("score")
 
     if filled_mask is None:
         filled_mask = np.zeros(len(field.nodes), bool)
@@ -117,9 +119,13 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
                 ax, ay = ax * cap / L, ay * cap / L
         tip = (int(x + ax), int(y + ay))
         colour = FILLED_BGR if filled_mask[i] else _color(c)
-        if slip_nodes is not None and slip_nodes[i]:
+        thick = 1
+        if score is not None and np.isfinite(score[i]):
+            colour = _slip_color(score[i])
+            thick = 2                        # imprint arrows read over texture
+        elif slip_nodes is not None and slip_nodes[i]:
             colour = SLIP_BGR
-        cv2.arrowedLine(vis, (int(x), int(y)), tip, colour, 1,
+        cv2.arrowedLine(vis, (int(x), int(y)), tip, colour, thick,
                         tipLength=0.35, line_type=cv2.LINE_AA)
         if cone_nodes is not None and cone_nodes[i]:
             cv2.circle(vis, (int(x), int(y)), 4, CONE_BGR, 1, cv2.LINE_AA)
@@ -152,7 +158,7 @@ def _draw_field(gray, field, contact, scale, min_conf, cap=None,
     # "slip=non-affine residual" off the right edge of every rendered video.
     legends = ["slide=mean tangential shift  twist=rotation x1e3  "
                "spread=push-out x1e3  slip=non-affine residual  "
-               "stick=imprint moving with the gel (red cells slide over it)",
+               "stick=imprint moving with the gel (blue arrows) vs sliding (red)",
                "slide=mean tangential shift  twist=rotation x1e3  "
                "spread=push-out x1e3  slip=non-affine residual",
                "slide=mean shift  twist=rotation x1e3  "
@@ -176,7 +182,8 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
            min_conf=0.10, fps=None, undistort=False, keep_fov=100.0,
            out_size=480, calib=None, coherence=True, max_dev=1.5, fill=True,
            slip=True, panel_dir=None, variants=None, slip_thresh=None,
-           mu=None, slip_area=True, slip_mode="temporal"):
+           mu=None, slip_area=True, slip_mode="temporal", lag=1,
+           local_ref=False, smooth=1):
     """``scale=None`` auto-sizes arrows so the 90th-pct one is ~0.9 grid cells.
 
     Real shear is only 1-3 px, so arrows must be magnified to be seen; auto
@@ -223,17 +230,17 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
             # Slip AREA as the imprint moving relative to the gel between
             # consecutive frames (shear.relative_slip) -- the definition that
             # survives a soft object deforming without sliding.
-            rs = shear.relative_slip(frames[i - 1], g, cm, spacing=spacing,
-                                     win=win, fov=fov, min_conf=min_conf,
-                                     thresh=slip_thresh, method=method)
+            # `lag` frames back: displacement over the lag, reported per frame
+            rs = shear.relative_slip(frames[max(0, i - lag)], g, cm,
+                                     spacing=spacing, win=win, fov=fov,
+                                     min_conf=min_conf, thresh=slip_thresh,
+                                     method=method, local_ref=local_ref)
             slip_nodes.append(rs["slip"])
-            slid = (slip_stats[-1]["slid_px"] if slip_stats and slip_stats[-1]
-                    else 0.0) + (rs["rel_speed"] if rs["sliding"] else 0.0)
             slip_stats.append({k: rs[k] for k in ("n_contact", "n_slip",
                                                   "slip_frac", "stick_ratio",
-                                                  "slip_area_px", "rel_speed",
-                                                  "sliding", "noise")}
-                              | {"slid_px": slid})
+                                                  "slip_area_px", "sliding",
+                                                  "noise", "score")}
+                              | {"rel_speed": rs["rel_speed"] / lag})
         elif slip_area:
             # Spatial alternative: non-affine residual on the contact patch.
             sm, _ = fld.slip_mask(min_conf, slip_thresh, contact=cm)
@@ -261,6 +268,26 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
             fmask = np.zeros(len(fld.nodes), bool)
         fields.append(fld)
         fills.append(fmask)
+    if slip_area and slip_mode == "temporal":
+        # Motion is continuous at video rate, flow noise is not: a median
+        # over `smooth` frames on the verdict removes single-frame flips.
+        verdict = np.array([bool(s["sliding"]) for s in slip_stats], float)
+        if smooth > 1:
+            from scipy.ndimage import median_filter
+            verdict = median_filter(verdict, smooth)
+        slid = 0.0
+        for s, v in zip(slip_stats, verdict):
+            s["sliding"] = bool(v)
+            if not v:                    # a non-sliding frame has no slip area
+                s["n_slip"], s["slip_frac"], s["stick_ratio"] = 0, 0.0, 1.0
+                s["slip_area_px"] = 0.0
+                s["score"] = np.where(np.isfinite(s["score"]), 0.0, np.nan)
+            else:
+                slid += s["rel_speed"]
+            s["slid_px"] = slid
+        slip_nodes = [sn & bool(s["sliding"]) if sn is not None else None
+                      for sn, s in zip(slip_nodes, slip_stats)]
+
     if scale is None:
         mags = np.concatenate([np.hypot(*f.vecs[f.conf >= min_conf].T)
                                for f in fields
@@ -274,8 +301,9 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
     # on how the background is drawn, so every background variant is rendered
     # from the SAME computed fields rather than by running the pipeline again.
     if variants is None:
+        # The gel is shown AS RECORDED: no denoise, no fade toward white.
         variants = [{"name": "default", "out": out_mp4,
-                     "denoise": True, "fade": 0.55}]
+                     "denoise": False, "fade": 0.0}]
     # Panels are kept for the FIRST variant only: they feed the GIF and the
     # peak-contact still, which should match the video a caller treats as primary.
     keep = panel_dir is not None
@@ -294,16 +322,16 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
                     zip(*series), start=1):
                 panel = _draw_field(frames[k], field, cm, scale, min_conf,
                                     cap=cap_len, filled_mask=fmask, slip=sl,
-                                    bg_denoise=v.get("denoise", True),
-                                    bg_fade=v.get("fade", 0.55),
+                                    bg_denoise=v.get("denoise", False),
+                                    bg_fade=v.get("fade", 0.0),
                                     slip_nodes=sn, slip_stats=ss,
                                     cone_nodes=cn)
                 cv2.imwrite(os.path.join(tmp, f"{k:05d}.png"), panel)
             os.makedirs(os.path.dirname(v["out"]) or ".", exist_ok=True)
             _encode(tmp, v["out"], fps)
             written.append({"name": v.get("name", "default"), "file": v["out"],
-                            "denoise": bool(v.get("denoise", True)),
-                            "fade": float(v.get("fade", 0.55))})
+                            "denoise": bool(v.get("denoise", False)),
+                            "fade": float(v.get("fade", 0.0))})
             print(f"  [{v.get('name','default')}] -> {v['out']}")
         finally:
             if not (keep and first):
@@ -328,7 +356,8 @@ def render(path, out_mp4, method="flow", spacing=26, win=41, scale=None,
                     for s in slip_stats],
         "rel_speed": [None if s is None else s.get("rel_speed")
                       for s in slip_stats],
-        "slip_mode": slip_mode,
+        "slip_mode": slip_mode, "lag": lag, "local_ref": local_ref,
+        "smooth": smooth,
         "traction_p90": traction,
     }
 
@@ -398,6 +427,19 @@ def main(argv=None):
                     help="temporal: imprint moving relative to the gel "
                          "between frames (default); spatial: non-affine "
                          "residual on the contact patch")
+    ap.add_argument("--lag", type=int, default=1,
+                    help="frames between the two images the relative motion "
+                         "is measured over (raises signal above flow noise)")
+    ap.add_argument("--local-ref", action="store_true",
+                    help="reference each imprint node to its nearest gel "
+                         "nodes instead of one ring-wide median")
+    ap.add_argument("--smooth", type=int, default=1,
+                    help="odd median window (frames) on the sliding verdict")
+    ap.add_argument("--fade", type=float, default=0.0,
+                    help="fade the gel toward white for display (0 = as "
+                         "recorded, the default)")
+    ap.add_argument("--denoise", action="store_true",
+                    help="non-local-means the background for display only")
     ap.add_argument("--mu", type=float, default=None,
                     help="friction-cone threshold on |shear|/darkening; ring "
                          "the nodes above it (needs calibrating per sensor)")
@@ -428,7 +470,10 @@ def main(argv=None):
                coherence=not args.no_coherence, max_dev=args.max_dev,
                fill=not args.no_fill, slip=not args.no_slip,
                slip_area=not args.no_slip_area, slip_thresh=args.slip_thresh,
-               mu=args.mu, slip_mode=args.slip_mode)
+               mu=args.mu, slip_mode=args.slip_mode, lag=args.lag,
+               local_ref=args.local_ref, smooth=args.smooth,
+               variants=[{"name": "default", "out": out,
+                          "denoise": args.denoise, "fade": args.fade}])
     print(f"outputs -> {out_dir}")
     return 0
 
