@@ -169,3 +169,25 @@ render scripts use a full-frame FOV since the rim is already gone.
 
 See also: [`docs/glowtact_sensor.md`](glowtact_sensor.md) (capturing data),
 the library README (package API).
+
+## Slip area (second modality)
+
+`glowtact-shear-field` shades the **slipping region** of the imprint red and
+prints the stick ratio and cumulative slid distance on the banner. Two
+definitions are available (`--slip-mode`):
+
+* **temporal** (default, `shear.relative_slip`): frame-to-frame flow on the
+  object's own texture inside the imprint vs the gel speckle around it. The
+  object gripped moves *with* the gel; a node moving relative to the
+  neighbouring gel is sliding. The frame verdict uses the robust aggregate
+  |v_object − v_gel| against the far gel's jitter; only a sliding frame is
+  partitioned into stuck vs slipped nodes. Partial slip below that gate is
+  not resolvable at the per-node noise on object texture (~0.5 px/frame).
+* **spatial** (`ShearField.slip_mask` / `slip_area`): non-affine residual
+  of the baseline-referenced field, RANSAC-fitted on the contact patch. A
+  soft object deforming non-affinely looks the same as one sliding, so use
+  it as a secondary cue.
+
+`ShearField.traction_ratio(pressure)` / `friction_cone_mask(pressure, mu)`
+give the per-node |shear| / normal-load ratio (depth from the LUT, or the
+darkening image as a proxy); `--mu` rings the nodes above a calibrated μ.
