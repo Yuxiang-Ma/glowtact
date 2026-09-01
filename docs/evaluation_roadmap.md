@@ -110,8 +110,11 @@ centre-to-rim slope variation (perimeter LEDs); Hertz contact-radius exponent
 maps made localisation worse -- they belong to a previous mount (centre ~10 px
 off, that session's tilt in the homography). Refit from the CNC metric
 correspondences (`calib/glowtact180/undistort_map_glowtact180_cnc0901.yaml`,
-RMS 0.213 mm) localisation improves to 0.205 mm. Rectification maps are per
-MOUNT: refit after any remount.
+RMS 0.213 mm) localisation improves to 0.205 mm and the Hertz a-F^(1/3) fit
+jumps R² 0.76 -> 0.88 (metric areas). Two rules learned: rectification maps
+are per MOUNT (refit after any remount), and rectify MEASUREMENTS, not images
+-- remapping whole frames costs more in centroid resampling bias than the
+distortion it removes (0.36 vs 0.21 mm).
 
 ## Start now with the data on disk
 
