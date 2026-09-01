@@ -106,8 +106,12 @@ iterations; final: contact localisation RMS 0.30 mm (round probe, p95 0.52,
 25 px/mm); sensitivity map R² 0.994 per location with a systematic 3x
 centre-to-rim slope variation (perimeter LEDs); Hertz contact-radius exponent
 0.322 per location vs the theoretical 1/3, radial darkening profile within RMS
-0.063 of the Hertz pressure profile. Undistortion with the shipped map made
-localisation worse -- refit it per unit before use.
+0.063 of the Hertz pressure profile. Undistortion with the shipped 2026-08
+maps made localisation worse -- they belong to a previous mount (centre ~10 px
+off, that session's tilt in the homography). Refit from the CNC metric
+correspondences (`calib/glowtact180/undistort_map_glowtact180_cnc0901.yaml`,
+RMS 0.213 mm) localisation improves to 0.205 mm. Rectification maps are per
+MOUNT: refit after any remount.
 
 ## Start now with the data on disk
 

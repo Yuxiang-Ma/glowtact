@@ -1,0 +1,43 @@
+warp:
+  model: radial
+  centre:
+  - 324.2778960817128
+  - 235.61940591329454
+  k:
+  - 1.1303295604117224e-05
+  - -1.939702597038123e-10
+  - 1.0110189086441294e-15
+  homography:
+  - -0.012756353982265057
+  - -0.8621407840869366
+  - 538.7552233143161
+  - -0.8398129269626455
+  - 0.008379861175340366
+  - 521.6318292976729
+  - -1.664844163614148e-05
+  - 1.3279480230178477e-05
+  - 1.0
+  pre_transform:
+  - - 0.00862546280395004
+    - 0.999962800003789
+    - 77.24877990182665
+  - - -0.999962800003789
+    - 0.00862546280395004
+    - 557.9179849282644
+  - - 0.0
+    - 0.0
+    - 1.0
+rows: 0
+cols: 0
+source_width: 640
+source_height: 480
+rms_residual_px: 5.25
+source_image: cnc:unit1_pad0 round probe, 3435 metric correspondences, 2026-09 mount,
+  tilt -90.5deg cancelled
+note: polynomial image->gel-plane rectification; visual consistency only, not a metric
+  calibration
+valid_region:
+  x0: 123
+  y0: 46
+  x1: 520
+  y1: 441
