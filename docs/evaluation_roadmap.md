@@ -99,6 +99,16 @@ slip labels added it becomes the citable asset.
 durability), 5+6 combined (one F/T-sensor session labels both 6-D force and
 slip; the library code is in place).
 
+## Done from the data on disk (2026-09-01)
+
+`~/tactile_data/glowtact/analysis/cnc_characterization/` — 18 logged
+iterations; final: contact localisation RMS 0.30 mm (round probe, p95 0.52,
+25 px/mm); sensitivity map R² 0.994 per location with a systematic 3x
+centre-to-rim slope variation (perimeter LEDs); Hertz contact-radius exponent
+0.322 per location vs the theoretical 1/3, radial darkening profile within RMS
+0.063 of the Hertz pressure profile. Undistortion with the shipped map made
+localisation worse -- refit it per unit before use.
+
 ## Start now with the data on disk
 
 `~/tactile_data/glowtact/cnc/<unit>_<pad>_<set>/...` encodes
