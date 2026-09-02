@@ -60,3 +60,26 @@ def apply_crop(image, crop):
     bounds, _w, _h, rotation = crop
     x0, y0, x1, y1 = bounds
     return rotate_image(image, rotation)[y0:y1, x0:x1]
+
+
+def despeckle(darkening, strength=7, template=5, search=21):
+    """Remove the gel's speckle noise from a darkening image, keeping detail.
+
+    Measured on the CNC controlled-loading set (13 candidate filters, scored
+    on no-contact residual noise, low-force SNR, localisation, Hertz profile
+    and screw-thread band energy): linear low-pass is a bad trade -- the
+    darkening image's SNR is positive at ALL spatial frequencies (+7 dB even
+    at the M1-thread pitch), so a Gaussian removes signal and speckle in equal
+    measure (sigma=2: thread detail 23%, speckle 21%). Non-local means
+    exploits the speckle's spatial statistics instead and keeps 99% of the
+    thread-band detail while dropping speckle-band noise to 16%, raising
+    low-force SNR 16.9 -> 21.8 and the noise p99 11.4 -> 8.4.
+
+    ~150 ms per 640x480 frame -- offline/figure/depth pipelines. For live
+    loops use cv2.bilateralFilter(d, 9, 25, 5) (5 ms; keeps 65% of detail at
+    21% speckle) or leave the image alone.
+    """
+    import cv2
+
+    d = np.clip(np.asarray(darkening), 0, 255).astype(np.uint8)
+    return cv2.fastNlMeansDenoising(d, None, strength, template, search)

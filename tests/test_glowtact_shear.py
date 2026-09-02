@@ -220,3 +220,22 @@ def test_nothing_moving_is_not_slip():
     prev, cur, contact = _pair(object_shift=(0, 0))
     r = shear.relative_slip(prev, cur, contact, spacing=20, win=31)
     assert r["n_slip"] == 0 and r["slip_area_px"] == 0.0
+
+
+def test_despeckle_removes_noise_but_keeps_ridges():
+    """The measured contract: speckle-scale noise drops hard, a ridge pattern
+    (fingerprint/thread scale, ~6 px period) survives nearly untouched."""
+    cv2 = pytest.importorskip("cv2")
+    from glowtact.imgfilt import despeckle
+    rng = np.random.default_rng(0)
+    ys, xs = np.mgrid[0:200, 0:200]
+    ridges = 40 + 30 * np.sin(2 * np.pi * xs / 6.0)          # 6 px pitch band
+    noisy = np.clip(ridges + rng.normal(0, 8, ridges.shape), 0, 255)
+    out = despeckle(noisy).astype(np.float32)
+    band = lambda a: float(np.mean((cv2.GaussianBlur(a, (0, 0), 1.5)
+                                    - cv2.GaussianBlur(a, (0, 0), 2.7)) ** 2))
+    keep = band(out) / band(np.float32(ridges))
+    flat = np.clip(40 + rng.normal(0, 8, ridges.shape), 0, 255)
+    resid = despeckle(flat).astype(np.float32).std()
+    assert keep > 0.7                                        # ridges survive
+    assert resid < 0.5 * np.float32(flat).std()              # noise halved+
