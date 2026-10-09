@@ -14,7 +14,8 @@ The library is split by what each module assumes about the sensor:
     glowtact.clean_diff, glowtact.enhance_diff
                          membrane-shift suppression, display band-pass
     glowtact.render, glowtact.figure, glowtact.imgfilt, glowtact.crop, glowtact.mask
-                         mesh rendering, paper figures, filters, crops, aperture
+                         mesh rendering, paper figures, filters + despeckle
+                         display pipeline, crops, aperture
     glowtact.tools       video / shear renderers and evaluators (console scripts)
     glowtact.calib       shipped per-unit undistortion maps (package data)
 
